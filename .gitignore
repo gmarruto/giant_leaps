@@ -143,6 +143,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+ai_giantleaps_venv/
 
 # Spyder project settings
 .spyderproject
@@ -167,6 +168,16 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+# Credenciales / secretos
+db_credentials.json
+auth.txt
+config.ovpn
+
+# Datos tabulares
+*.csv
+*.xlsx
+
 
 # PyCharm
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
@@ -205,3 +216,24 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+
+# ======================
+# IDE / SO
+# ======================
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+~$*.xlsx
+
+
+# Modelos entrenados
+*.pkl
+*.joblib
+*.pt
+*.onnx
+*.h5
+
+lanzarAPI.sh
+
