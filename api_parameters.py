@@ -1,7 +1,7 @@
 
 def load_parameters():
 
-    db_conn_file = 'ai_giantleaps/others/db_credentials.txt'
+    db_conn_file = 'others/db_credentials.json'
     db_name = REMOVED
     db_type = 'PostgreSQL'
 

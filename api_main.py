@@ -13,9 +13,11 @@ import api_parameters
 import utils.pca_analysis as pca_analysis
 import utils.ai_protein_screening as ai
 
+import utils.data_engineering_layer as de
+
 api_params = api_parameters.load_parameters()
 
-giantleaps_engine = giant_leaps_utils.connect_giantleaps_database()
+giantleaps_engine = giant_leaps_utils.connect_giantleaps_database(api_params['db_conn_file'], api_params['db_name'])
 
 app = FastAPI()
 
@@ -27,15 +29,19 @@ async def test():
 @app.post("/semantic_analysis")
 def semantic_analysis():
     
-    ai.semanticDataAnalysis(giantleaps_engine)
+    de.semanticDataAnalysis(giantleaps_engine)
 
 @app.post("/generate_clean_dataset_nutrients")
 def generate_clean_dataset_nutrients():
-    ai.generateCleanDatasetNutrients(giantleaps_engine)
+    de.generateCleanDatasetNutrients(giantleaps_engine)
 
 @app.post("/generate_clean_dataset_aminoacids")
 def generate_clean_dataset_aminoacids():
-    ai.generateCleanDatasetAminoAcids(giantleaps_engine)
+    de.generateCleanDatasetAminoAcids(giantleaps_engine)
+
+@app.post("/generate_clean_dataset_environmental")
+def generate_clean_dataset_environmental():
+    de.generateCleanDatasetEnvironmental(giantleaps_engine)
 
 @app.get("/alternative_proteins_list", status_code=status.HTTP_200_OK)
 def getAltProteinList(data: data_models.userProteinInput) -> data_models.ListAlernativeProtein:

@@ -5,6 +5,12 @@ import joblib
 
 from fastapi import HTTPException, status
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import api_parameters
 import giant_leaps_utils as giant_leaps_utils
 import data_models as data_models
 import protein_screening_parameters as protein_screening_parameters
@@ -21,10 +27,10 @@ import json
 import datetime
 
 
-#api_params = api_parameters.load_parameters()
+api_params = api_parameters.load_parameters()
 protscreen_params = protein_screening_parameters.load_parameters()
 
-giantleaps_engine = giant_leaps_utils.connect_giantleaps_database()
+giantleaps_engine = giant_leaps_utils.connect_giantleaps_database(api_params['db_conn_file'], api_params['db_name'])
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from sklearn.decomposition import PCA
 
 from fastapi import HTTPException, status
 
+
 import api_parameters
 import utils.data_models as data_models
 import utils.protein_screening_parameters as protein_screening_parameters
@@ -192,14 +193,13 @@ def semanticDataAnalysis(engine):
                                     public.tmp_protein_sources_category \
                                 WHERE public.tmp_protein_sources_category.protein_source_or_food_product = public.protein_source_format_gm.protein_source_or_food_product;"
 
-    insert_protein_sources = "INSERT INTO public.protein_source_format_gm (protein_source_or_food_product, category, protein_source) \
+    insert_protein_sources = "INSERT INTO public.protein_source_format_gm(protein_source_or_food_product, category) \
                                 SELECT \
                                     public.tmp_protein_sources_category.protein_source_or_food_product, \
-                                    public.tmp_protein_sources_category.category, \
-                                    public.tmp_protein_sources_category.protein_source \
+                                    public.tmp_protein_sources_category.category \
                                 FROM \
                                     public.tmp_protein_sources_category \
-                                WHERE public.tmp_protein_sources_category.protein_source_or_food_product = public.protein_source_format_gm.protein_source_or_food_product;"
+                                WHERE public.tmp_protein_sources_category.protein_source_or_food_product NOT IN  (SELECT protein_source_or_food_product FROM public.protein_source_format_gm);"
 
     with engine.connect() as connection:
         trans = connection.begin()
@@ -585,6 +585,192 @@ def getInputProteinAminoAcidData(id, engine):
     return df_data_group_pivot
 
 
+def getInputProteinEnvironmentalData(id, engine):
+
+    # Step 1: Extract raw data from the database
+    # Load food sources data
+    selectProteinSources = "SELECT \
+                                fs2.id,\
+                                fs2.protein_source_or_food_product,\
+                                psfg.protein_source \
+                            FROM \
+	                            dcf_data.food_sources fs2 \
+                            LEFT JOIN protein_source_format_gm psfg ON fs2.id = psfg.id \
+                            WHERE \
+	                            fs2.id = '{}'".format(id)
+
+    selectProteinRelations = "SELECT\
+                                *\
+                            FROM\
+                                dcf_data.food_data_source_relations fdsr\
+                            WHERE \
+                                fdsr.food_product_id = '{}';".format(id)
+
+    selectEnvironmentalImpact = "SELECT\
+                                    psfg.protein_source_or_food_product,\
+                                    cia.food_data_source_relation_id,\
+                                    eei.indicator_name,\
+                                    eeif.env_indicator_id,\
+                                    eeif.amount_or_impact_value,\
+                                    eeif.unit\
+                                FROM\
+                                    protein_source_format_gm psfg\
+                                INNER JOIN dcf_data.food_data_source_relations fdsr ON fdsr.food_product_id = psfg.id\
+                                INNER JOIN dcf_data.combined_inventory_activities cia on cia.food_data_source_relation_id = fdsr.id\
+                                INNER JOIN dcf_data.elca_environment_indicator_facts eeif on cia.id = eeif.activity_id\
+                                INNER JOIN dcf_data.elca_environment_indicators eei ON eei.id = eeif.env_indicator_id\
+                                WHERE\
+                                    psfg.id = '{}';".format(id)
+
+    selectEnvironmentalIndicators = "select\
+                                        *\
+                                    from\
+                                        dcf_data.elca_environment_indicators eei;"
+
+    selectEnvironmentalUnits = "SELECT DISTINCT\
+                                    eei.indicator_name,\
+                                    eeif.unit\
+                                FROM\
+                                    dcf_data.elca_environment_indicator_facts eeif\
+                                INNER JOIN dcf_data.elca_environment_indicators eei ON eei.id = eeif.env_indicator_id;"
+
+    selectProteinsWithoutEnvironmentalValues = "SELECT DISTINCT\
+                                            ntv.protein_source\
+                                        FROM\
+                                            nutrients_theoretical_values ntv\
+                                        LEFT JOIN environmental_theoretical_values etv on etv.protein_source = ntv.protein_source\
+                                        WHERE\
+                                            etv.protein_source IS NULL;"
+
+    with engine.connect() as connection:
+        trans = connection.begin()
+        result_proteinSources = pd.read_sql_query(text(selectProteinSources), con=connection)
+        result_proteinRelations = pd.read_sql_query(text(selectProteinRelations), con=connection)
+        result_environmentalImpact = pd.read_sql_query(text(selectEnvironmentalImpact), con=connection)
+        result_environmentalIndicators = pd.read_sql_query(text(selectEnvironmentalIndicators), con=connection)
+        result_environmentalUnits = pd.read_sql_query(text(selectEnvironmentalUnits), con=connection)
+        result_proteinsWithoutEnvironmentalValues = pd.read_sql_query(text(selectProteinsWithoutEnvironmentalValues), con=connection)
+        trans.commit()
+
+    df_food_sources = pd.DataFrame(result_proteinSources)
+    df_food_relations = pd.DataFrame(result_proteinRelations)
+    df_food_relations.rename(columns={"id":"relation_id"}, inplace=True)
+    df_environmental_impact = pd.DataFrame(result_environmentalImpact)
+    df_environmental_indicators = pd.DataFrame(result_environmentalIndicators)
+    df_environmental_units = pd.DataFrame(result_environmentalUnits)
+    df_proteins_without_environmental_values = pd.DataFrame(result_proteinsWithoutEnvironmentalValues)
+
+    #   Merge food sources with domains relations
+    # df_proteins = df_food_sources[~df_food_sources.protein_source.isna()][['id','protein_source_or_food_product', 'protein_source']]
+    df_proteins = df_food_sources[['id','protein_source_or_food_product', 'protein_source']]
+    df_proteins_relations = df_proteins.merge(df_food_relations, how = 'inner', left_on='id', right_on='food_product_id', suffixes=('', '_remove'))
+    df_proteins_relations.drop([i for i in df_proteins_relations.columns if 'remove' in i], axis=1, inplace=True) # drop duplicated columns
+    # Merge with environmental impact values
+    df_proteins_relations = df_proteins_relations.merge(df_environmental_impact, how='left', left_on='relation_id', right_on='food_data_source_relation_id', suffixes=('', '_remove'))
+    df_proteins_relations.drop([i for i in df_proteins_relations.columns if 'remove' in i], axis=1, inplace=True) # drop duplicated columns
+
+    df_dataset_env = df_proteins_relations.merge(df_environmental_units, how='cross', suffixes=('_remove',''))
+    df_dataset_env.drop([i for i in df_dataset_env.columns if 'remove' in i], axis=1, inplace=True) # drop duplicated columns
+
+    #df_env_indicators_units = df_environmental_indicators.merge(df_environmental_units, how='inner', left_on='indicator_name', right_on='indicator_name')
+
+    df_dataset_env.loc[df_dataset_env.protein_source_or_food_product.isna(),'protein_source_or_food_product'] = df_proteins.protein_source_or_food_product.values[0]
+    df_dataset_env.loc[df_dataset_env.id.isna(),'id'] = df_proteins.id.values[0]
+    df_dataset_env.loc[df_dataset_env.protein_source.isna(),'protein_source'] = df_proteins.protein_source.values[0]
+
+    df_dataset_env = df_dataset_env.merge(df_environmental_units, how='inner', left_on='indicator_name', right_on='indicator_name', suffixes=('_remove',''))
+    df_dataset_env.drop([i for i in df_dataset_env.columns if 'remove' in i], axis=1, inplace=True)
+
+    # Conversion
+
+    # df_amino_acids_conversion = df_amino_acids_conversion.applymap(lambda x: x.replace('\xa0', ' ').replace('Â', '') if isinstance(x, str) else x)
+    # df_dataset_aa_standard = df_dataset_aa.merge(df_amino_acids_conversion, how='left', left_on=['amino_acid_name','unit'], right_on=['amino_acid_name','unit'])
+    #     # If there is no conversion factor or standardized unit, it means that the amount is already standardized and the unit is g/100g Protein, so we fill those values
+    # df_dataset_aa_standard.loc[df_dataset_aa_standard.standardized_unit.isna(),'standardized_unit'] = 'g/100 g Protein'
+    # df_dataset_aa_standard.loc[df_dataset_aa_standard.conversion_factor.isna(),'conversion_factor'] = 1
+    # df_dataset_aa_standard.loc[df_dataset_aa_standard.protein_source_or_food_product.isna(),'protein_source_or_food_product'] = df_proteins.protein_source_or_food_product.values[0]
+    # df_dataset_aa_standard.loc[df_dataset_aa_standard.id.isna(),'id'] = df_proteins.id.values[0]
+    # df_dataset_aa_standard.loc[df_dataset_aa_standard.protein_source.isna(),'protein_source'] = df_proteins.protein_source.values[0]
+
+    # df_dataset_aa_standard['conversion_factor'] = df_dataset_aa_standard['conversion_factor'].apply(lambda x: float(x.replace(',', '.')) if isinstance(x, str) else x)
+    # df_dataset_aa_standard['amount'] = df_dataset_aa_standard['amount'].apply(lambda x: float(x.replace(',', '.')) if isinstance(x, str) else x)
+    # df_dataset_aa_standard['standardized_amount'] = df_dataset_aa_standard['conversion_factor']*df_dataset_aa_standard['amount']
+    #     # Filter atypical values that are higher than 100g of amino acid per 100g of product
+    # df_dataset_aa_standard = df_dataset_aa_standard[(df_dataset_aa_standard.standardized_amount <= 100) | (df_dataset_aa_standard.standardized_amount.isna())]
+
+    # # Merge essentiality to proteins 
+    # df_dataset_aa_standard = df_dataset_aa_standard.merge(protscreen_params['df_essentiality'], how='left', left_on='amino_acid_name', right_on='amino_acid_name', suffixes=('', '_remove'))
+    # df_dataset_aa_standard = df_dataset_aa_standard.merge(protscreen_params['df_source_type'], how='left', left_on= 'protein_source', right_on='protein_source',suffixes=('', '_remove'))
+    # df_dataset_aa_standard = df_dataset_aa_standard.merge(df_food_sources, how='left', left_on='protein_source_or_food_product', right_on='protein_source_or_food_product', suffixes=('', '_remove'))
+    # df_dataset_aa_standard.drop([i for i in df_dataset_aa_standard.columns if 'remove' in i], axis=1, inplace=True) # drop duplicated columns
+
+    # fill the missing values of protein source and source type with 'unknown' since those are required for the imputation model and they are not informed in the dataset (those that are in the amino acid dataset but not in the nutrients dataset)
+    df_dataset_env.protein_source.fillna('unknown', inplace=True)
+    #df_dataset_env.source_type.fillna('unknown', inplace=True)
+
+    df_dataset_env['indicator_unit'] = df_dataset_env['indicator_name'] + ' (' + df_dataset_env['unit'] + ')' # merge environmental name and environmental unit
+    df_data = df_dataset_env[['id','protein_source_or_food_product','protein_source','indicator_unit', 'amount_or_impact_value']]
+
+    # Multiple reported amounts for the same nutrient and same protein, calculate the mean
+    df_data_group = df_data[['id','protein_source_or_food_product','protein_source','indicator_unit','amount_or_impact_value']].groupby(['id','protein_source_or_food_product','protein_source','indicator_unit']).mean().reset_index()
+    # Data is ready to pivot
+    df_data_group_pivot = df_data_group.pivot(index=['id','protein_source_or_food_product','protein_source'], columns='indicator_unit', values='amount_or_impact_value').reset_index()
+    df_environmental_unit_list = pd.DataFrame(data={'indicator_unit':df_data_group_pivot.columns[5:]})
+
+    df_data_group_pivot.columns.name = ''
+
+    # # aminoacids for each protein source
+    # df_data_group_pivot = df_data_group_pivot.drop(columns=['source_type'])
+    # df_avg_aminoacid_protein_source = df_data_group_pivot.iloc[:,1:].groupby('protein_source').mean().reset_index()
+    
+    # for variable in df_avg_aminoacid_protein_source.columns[1:]:
+    #     var_mean = df_avg_aminoacid_protein_source[variable].mean()
+    #     df_avg_aminoacid_protein_source[variable] = df_avg_aminoacid_protein_source[variable].fillna(var_mean)
+
+    #     # Imputa mean values to protein sources without amino acid data (those that are in the nutrients dataset but not in the amino acid dataset)
+    # for idx, row in df_proteins_without_amino_acids.iterrows():
+    #     df_avg_aminoacid_protein_source.loc[len(df_avg_aminoacid_protein_source),'protein_source'] = row['protein_source'] 
+    #     for variable in df_avg_aminoacid_protein_source.columns[1:]:
+    #         var_mean = df_avg_aminoacid_protein_source[variable].mean()
+    #         df_avg_aminoacid_protein_source.loc[df_avg_aminoacid_protein_source['protein_source'] == row['protein_source'], variable] = var_mean
+
+    selectEnvironmentalTheoretical = "SELECT\
+                                    *\
+                                FROM\
+                                    public.environmental_theoretical_values ntv;"
+
+    with engine.connect() as connection:
+        trans = connection.begin()
+        result_EnvironmentalTheoretical = pd.read_sql_query(text(selectEnvironmentalTheoretical), con=connection)
+        trans.commit()
+
+    df_environmental_theoretical = pd.DataFrame(result_EnvironmentalTheoretical)
+    # environmental avg
+    df_avg_environmental = df_environmental_theoretical.describe().transpose().reset_index()
+    df_avg_environmental = df_avg_environmental.round(2)
+    df_avg_environmental.rename(columns={'index':'environmental_variable'}, inplace=True)
+
+    # DATA IMPUTATION
+    print('Starting environmental data imputation...')
+    # Select only environmental theoretical value columns
+    sel_columns = ['id']
+    sel_columns.extend(list(df_environmental_theoretical.columns))
+    df_data_group_pivot = df_data_group_pivot[sel_columns]
+    df_data_group_pivot[list(df_environmental_theoretical.columns)[1:]] = df_data_group_pivot[list(df_environmental_theoretical.columns)[1:]].astype(float)
+    #   1 - If the variable value is NA then impute with the environmental variable mean value of the same protein source
+    if not df_data_group_pivot['protein_source'].item() == 'unknown':
+        for idx, row in df_data_group_pivot.iterrows():
+            for jdx, item in row[row.isna()].items():
+                df_data_group_pivot.loc[idx,jdx] = df_environmental_theoretical.loc[df_environmental_theoretical.protein_source == row['protein_source'], jdx].values[0]
+
+    #   2 - If stills being NA impute with the environmental variable mean value
+    for idx, row in df_data_group_pivot.iterrows():
+        for jdx, item in row[row.isna()].items():
+            df_data_group_pivot.loc[idx,jdx] = df_avg_environmental.loc[df_avg_environmental.environmental_variable == jdx, 'mean'].values[0]
+
+    return df_data_group_pivot
+
+
 def generateCleanDatasetNutrients(engine):
     ##################################################
     # NUTRITIONAL DATASET CLEANING AND TRANSFORMATION
@@ -688,8 +874,10 @@ def generateCleanDatasetNutrients(engine):
     df_proteins_complete['amount'] = df_proteins_complete['amount'].replace('traces', '0.001')
     df_proteins_complete['amount'] = df_proteins_complete['amount'].replace('1518.61d ', '1518.61')
     df_proteins_complete['amount'] = df_proteins_complete['amount'].replace('69.33a', '69.33')
+    df_proteins_complete['amount'] = df_proteins_complete['amount'].replace('92.6 (84.5)', '92.6')
+    df_proteins_complete['amount'] = df_proteins_complete['amount'].replace('94.4 (86.1)', '94.4')
     df_proteins_complete['amount'] = df_proteins_complete['amount'].replace('Not detected', '0')
-    df_proteins_complete['amount'] = df_proteins_complete['amount'].replace(' LOQ', '0')
+    df_proteins_complete['amount'] = df_proteins_complete['amount'].replace('LOQ', '0')
     df_proteins_complete['amount'] = df_proteins_complete['amount'].astype('float')
 
     df_proteins_complete['unit'] = df_proteins_complete['unit'].str.replace('µg','ug') # replace micrograms unit symbol
@@ -849,7 +1037,7 @@ def generateCleanDatasetAminoAcids(engine):
     df_proteins_relations.drop([i for i in df_proteins_relations.columns if 'remove' in i], axis=1, inplace=True) # drop duplicated columns
     # Merge with aminoacids composition
     df_dataset_aa = df_amino_acids_composition.applymap(lambda x: x.replace('\xa0', ' ').replace('Â', '') if isinstance(x, str) else x)
-    df_dataset_aa = df_proteins_relations.merge(df_dataset_aa, how='inner', left_on='relation_id', right_on='food_data_source_relation_id', suffixes=('', '_remove'))
+    df_dataset_aa = df_proteins_relations.merge(df_dataset_aa, how='left', left_on='relation_id', right_on='food_data_source_relation_id', suffixes=('', '_remove'))
     df_dataset_aa.drop([i for i in df_dataset_aa.columns if 'remove' in i], axis=1, inplace=True) # drop duplicated columns
 
     df_dataset_aa = df_dataset_aa.merge(df_amino_acids, how='inner', left_on='amino_acid_id', right_on='id', suffixes=('', '_remove'))
@@ -887,8 +1075,17 @@ def generateCleanDatasetAminoAcids(engine):
         var_mean = df_avg_aminoacid_protein_source[variable].mean()
         df_avg_aminoacid_protein_source[variable] = df_avg_aminoacid_protein_source[variable].fillna(var_mean)
 
-        # Imputa mean values to protein sources without amino acid data (those that are in the nutrients dataset but not in the amino acid dataset)
+    # Imputa mean values to protein sources without amino acid data (those that are in the nutrients dataset but not in the amino acid dataset)
     for idx, row in df_proteins_without_amino_acids.iterrows():
+        df_avg_aminoacid_protein_source.loc[len(df_avg_aminoacid_protein_source),'protein_source'] = row['protein_source'] 
+        for variable in df_avg_aminoacid_protein_source.columns[1:]:
+            var_mean = df_avg_aminoacid_protein_source[variable].mean()
+            df_avg_aminoacid_protein_source.loc[df_avg_aminoacid_protein_source['protein_source'] == row['protein_source'], variable] = var_mean
+    
+    # !!! TO IMPROVE: For some reason there are some protein sources that are in the nutrients dataset but not in the amino acid dataset and they are not being captured by the query above. So, I will check for those protein sources and impute their values as well.
+    proteins_without_aminoacids = [elemento for elemento in list(df_proteins_relations.protein_source.unique()) if elemento not in list(df_avg_aminoacid_protein_source.protein_source.unique())]
+    df_proteins_without_amino_acids_2 = pd.DataFrame(data={'protein_source':proteins_without_aminoacids})
+    for idx, row in df_proteins_without_amino_acids_2.iterrows():
         df_avg_aminoacid_protein_source.loc[len(df_avg_aminoacid_protein_source),'protein_source'] = row['protein_source'] 
         for variable in df_avg_aminoacid_protein_source.columns[1:]:
             var_mean = df_avg_aminoacid_protein_source[variable].mean()
@@ -929,6 +1126,143 @@ def generateCleanDatasetAminoAcids(engine):
 
     return
 
+def generateCleanDatasetEnvironmental(engine):
+    ###################################################
+    #   ENVIRONMENTAL DATASET CLEANING AND TRANSFORMATION
+    ###################################################
+    # Step 1: Extract raw data from the database
+    # Load food sources data
+    selectProteinSources = "SELECT\
+                            *\
+                        FROM\
+                            public.protein_source_format_gm psfg"
+
+    selectProteinRelations = "SELECT\
+                                *\
+                            FROM\
+                                dcf_data.food_data_source_relations fdsr;"
+
+    selectEnvironmentalSustainabilityFacts = "SELECT \
+                                            *\
+                                        from\
+                                            public.protein_source_format_gm psfg\
+                                        INNER JOIN dcf_data.food_data_source_relations fdsr ON fdsr.food_product_id = psfg.id\
+                                        inner join dcf_data.combined_inventory_activities cia on cia.food_data_source_relation_id = fdsr.id \
+                                        inner join dcf_data.elca_environment_indicator_facts eeif on cia.id = eeif.activity_id;"
+
+    selectEnvironmentalSustainabilityIndicators = "SELECT DISTINCT eei.indicator_name, eeif.env_indicator_id,eeif.unit FROM dcf_data.elca_environment_indicator_facts eeif INNER JOIN dcf_data.elca_environment_indicators eei ON eei.id = eeif.env_indicator_id;"
+
+    with engine.connect() as connection:
+        trans = connection.begin()
+        result_proteinSources = pd.read_sql_query(text(selectProteinSources), con=connection)
+        result_proteinRelations = pd.read_sql_query(text(selectProteinRelations), con=connection)
+        resultEnvironmentalSustainabilityFacts = pd.read_sql_query(text(selectEnvironmentalSustainabilityFacts), con=connection)
+        resultEnvironmentalSustainabilityIndicators = pd.read_sql_query(text(selectEnvironmentalSustainabilityIndicators), con=connection)
+        trans.commit()
+
+    df_food_sources = pd.DataFrame(result_proteinSources)
+    df_food_relations = pd.DataFrame(result_proteinRelations)
+    df_food_relations.rename(columns={"id":"relation_id"}, inplace=True)
+    df_environmental_sustainability = pd.DataFrame(resultEnvironmentalSustainabilityFacts)
+    df_environmental_sustainability_indicators = pd.DataFrame(resultEnvironmentalSustainabilityIndicators)
+
+    # Step 2: Process and transform dataset
+    #   Get and save informed environmental sustainability indicators
+
+    #   Merge food sources with domains relations
+    df_proteins = df_food_sources[~df_food_sources.protein_source.isna()][['id','protein_source_or_food_product', 'protein_source']]
+    df_proteins_relations = df_proteins.merge(df_food_relations, how = 'inner', left_on='id', right_on='food_product_id', suffixes=('', '_remove'))
+    df_proteins_relations.drop([i for i in df_proteins_relations.columns if 'remove' in i], axis=1, inplace=True) # drop duplicated columns
+
+    #  Merge with environmental sustainability facts
+    df_proteins_relations_environmental_sustainability = df_proteins_relations.merge(df_environmental_sustainability, how='inner', left_on='relation_id', right_on='food_data_source_relation_id', suffixes=('', '_remove'))
+    df_proteins_relations_environmental_sustainability.drop([i for i in df_proteins_relations_environmental_sustainability.columns if 'remove' in i], axis=1, inplace=True) # drop duplicated columns
+
+    # !!!!!!! IF IT WAS STANDARDISED IT, THE MERGE WILL BE MADE JUST USING INDICATOR_ID
+    df_proteins_complete = df_proteins_relations_environmental_sustainability.merge(df_environmental_sustainability_indicators, how='inner', left_on=['env_indicator_id','unit'], right_on=['env_indicator_id','unit'], suffixes=('', '_remove'))
+    df_proteins_complete.drop([i for i in df_proteins_complete.columns if 'remove' in i], axis=1, inplace=True) # drop duplicated columns
+
+    # Clean syntax
+    df_proteins_complete['amount_or_impact_value'] = df_proteins_complete['amount_or_impact_value'].astype(float)
+
+    # Select environmental indicators that are informed
+
+    df_lookup_environmental_indicators = pd.DataFrame({"env_indicator_name":['Resource use, minerals and metals','Land use','Human toxicity, cancer','Climate change','Acidification','Eutrophication, terrestrial',
+                                    'Ecotoxicity, freshwater - inorganics','Human toxicity, cancer - organics','Climate change - Land use and LU change','Climate change - Biogenic',
+                                    'Climate change - Fossil','Human toxicity, cancer - inorganics','Ionising radiation','Human toxicity, non-cancer','Eutrophication, freshwater',
+                                    'Human toxicity, non-cancer - organics','Photochemical ozone formation','Eutrophication, marine','Resource use, fossils','Ozone depletion',
+                                    'Human toxicity, non-cancer - inorganics','Particulate matter','Water use'],
+                "unit":['kg Sb eq','Pt','CTUh','kg CO2 eq','mol H+ eq','mol N eq','CTUe','CTUh','kg CO2 eq','kg CO2 eq','kg CO2 eq','CTUh','kBq U-235 eq','CTUh','kg P eq','CTUh','kg NMVOC eq',
+                        'kg N eq','MJ','kg CFC11 eq','CTUh','disease inc.','m3 depriv.']})
+
+    # Select only climate change indicator for testing
+    df_proteins_complete_selected = df_proteins_complete[(df_proteins_complete.indicator_name == 'Climate change') & (df_proteins_complete.unit == 'kg CO2 eq')]
+    df_proteins_complete_selected['indicator_name_unit'] = df_proteins_complete_selected['indicator_name'] + ' (' + df_proteins_complete_selected['unit'] + ')' # merge nutrient name and nutrient unit
+
+    # Multiple reported amounts for the same nutrient and same protein, calculate the mean
+    df_proteins_complete_selected_avg = df_proteins_complete_selected.groupby(['protein_source_or_food_product','protein_source','indicator_name_unit']).agg({'amount_or_impact_value':'mean'}).round(2).reset_index()
+
+
+    # Data is ready to pivot
+    df_data_group_pivot = df_proteins_complete_selected_avg.pivot(index=['protein_source_or_food_product','protein_source'], columns='indicator_name_unit', values='amount_or_impact_value').reset_index()
+    #
+    df_data_group_pivot.columns.name = ''
+
+    # CALCULATES AVG VALUES OF ENVIRONMENTAL INDICATORS PER PROTEIN SOURCE AND AVG ENV INDICATOR VALUES
+    # environmental indicators for each protein source
+    df_avg_environmental_protein_source = df_data_group_pivot.iloc[:,1:].groupby(['protein_source']).mean().reset_index()
+    df_avg_environmental_protein_source = df_avg_environmental_protein_source.round(2)
+
+    # !!! TO IMPROVE: For some reason there are some protein sources that are in the nutrients and amino acids dataset but not in the environment dataset and they are not being captured by the query above. So, I will check for those protein sources and impute their values as well.
+    proteins_without_aminoacids = [elemento for elemento in list(df_proteins_relations.protein_source.unique()) if elemento not in list(df_avg_environmental_protein_source.protein_source.unique())]
+    df_proteins_without_amino_acids_2 = pd.DataFrame(data={'protein_source':proteins_without_aminoacids})
+    for idx, row in df_proteins_without_amino_acids_2.iterrows():
+        df_avg_environmental_protein_source.loc[len(df_avg_environmental_protein_source),'protein_source'] = row['protein_source'] 
+        for variable in df_avg_environmental_protein_source.columns[1:]:
+            var_mean = df_avg_environmental_protein_source[variable].mean()
+            df_avg_environmental_protein_source.loc[df_avg_environmental_protein_source['protein_source'] == row['protein_source'], variable] = var_mean
+
+    # save environmental theoretical values per protein source
+    df_avg_environmental_protein_source.to_sql('environmental_theoretical_values', engine, if_exists='replace', index=False)
+
+    # environmental indicator avg
+    df_avg_environmental = df_data_group_pivot.describe().transpose().reset_index()
+    df_avg_environmental = df_avg_environmental.round(2)
+    df_avg_environmental.rename(columns={'':'environmental_indicator'}, inplace=True)
+
+    # DATA IMPUTATION
+    print('Starting environmental data imputation...')
+
+    #   1 - If the variable value is NA then impute with the environmental mean value of the same protein source
+    for idx, row in df_data_group_pivot.iterrows():
+        print(row['protein_source_or_food_product'])
+        for jdx, item in row[row.isna()].items():
+            if df_avg_environmental_protein_source.loc[(df_avg_environmental_protein_source.protein_source == row['protein_source']), jdx].empty:
+                df_data_group_pivot.loc[idx,jdx] = df_avg_environmental_protein_source.loc[(df_avg_environmental_protein_source.protein_source == row['protein_source']), jdx].values[0]
+                break
+            else:
+                df_data_group_pivot.loc[idx,jdx] = df_avg_environmental_protein_source.loc[(df_avg_environmental_protein_source.protein_source == row['protein_source']), jdx].values[0]
+
+    #   2 - If stills being NA impute with the environmental mean value
+    for idx, row in df_data_group_pivot.iterrows():
+        for jdx, item in row[row.isna()].items():
+            df_data_group_pivot.loc[idx,jdx] = df_avg_environmental_protein_source.loc[df_avg_environmental_protein_source.protein_source == row['protein_source'], jdx].values[0]
+
+    # SAVE CLEAN DATAFRAME TO THE DATABASE
+    df_data_group_pivot.to_sql('environmental_data_imputation_model_input', engine, if_exists='replace', index=False)
+
+
+    # NORMALISATION MIN-MAX OVER THE CLEAN DATASET
+    print('Starting environmental data normalisation...')
+    df_final_environmental_scaled = df_data_group_pivot.copy()
+
+    for column in df_final_environmental_scaled.columns[2:len(df_final_environmental_scaled.columns)-2]:
+        df_final_environmental_scaled[column] = (df_final_environmental_scaled[column] - df_final_environmental_scaled[column].min()) / (df_final_environmental_scaled[column].max() - df_final_environmental_scaled[column].min())
+
+    df_final_environmental_scaled.to_sql('environmental_data_imputation_model_input_normalised', engine, if_exists='replace', index=False)
+
+    return
+
 
 def AltProtRecommendation(data: data_models.userProteinInput, engine):
 
@@ -963,7 +1297,7 @@ def AltProtRecommendation(data: data_models.userProteinInput, engine):
     # Define relevant variables for the model (nutrients and amino acids)
     relevant_variables = ["protein_source", "Fat (g)", "Glutamic acid (Glu/E) (g/100 g Protein)", "Valine (Val/V) (g/100 g Protein)", "Phenylalanine (Phe/F) (g/100 g Protein)",
     "Phosphorus (mg)", "Moisture (g)", "Carbohydrate (g)", "Polyunsaturated fatty acids (PUFA) (g)", "Chromium (ug)", "Proline (Pro/P) (g/100 g Protein)", "Total sugar (g)",
-    "Starch (g)", "Protein (g)"]
+    "Starch (g)", "Protein (g)","Climate change (kg CO2 eq)"]
 
     # Check if the protein ID exists in the database
     selectProteinId = "SELECT \
@@ -1012,11 +1346,21 @@ def AltProtRecommendation(data: data_models.userProteinInput, engine):
                             WHERE\
                                 psfg.id = '{}';".format(data.proteinId)
 
+    selectProteinEnvironmental = "SELECT\
+                                psfg.id,\
+                                edim.*\
+                            FROM\
+                                public.environmental_data_imputation_model_input_normalised edim\
+                            INNER JOIN protein_source_format_gm psfg ON edim.protein_source_or_food_product = psfg.protein_source_or_food_product\
+                            WHERE\
+                                psfg.id = '{}';".format(data.proteinId)
+
     with engine.connect() as connection:
         trans = connection.begin()
         result_source_type = pd.read_sql_query(text(selectProteinSourceAndCategory), con=connection)
         result_nutrients = pd.read_sql_query(text(selectProteinNutrients), con=connection)
         result_aminoacids = pd.read_sql_query(text(selectProteinAminoAcids), con=connection)
+        result_environmental = pd.read_sql_query(text(selectProteinEnvironmental), con=connection)
         trans.commit()
 
     source_type = result_source_type.values[0][0]
@@ -1034,11 +1378,19 @@ def AltProtRecommendation(data: data_models.userProteinInput, engine):
     # If there are no normalised amino acid data for the (protein) item, get the raw data and process it
     if df_protein_source_aminoacids.empty:
         df_protein_source_aminoacids = getInputProteinAminoAcidData(data.proteinId, engine)
+    
+    df_protein_source_environmental = pd.DataFrame(result_environmental)
+    # If there are no normalised environmental data for the (protein) item, get the raw data and process it
+    if df_protein_source_environmental.empty:
+        df_protein_source_environmental = getInputProteinEnvironmentalData(data.proteinId, engine)
 
-    # !!! Falta hacer el merge entre los dataframes de nutrientes y aminoacidos normalizados
+    # Merge nutrient and amino acid data for the input protein
     df_input_protein = df_protein_source_nutrients.merge(df_protein_source_aminoacids, how='inner', left_on=['id'], right_on=['id'], suffixes=('', '_remove'))
     df_input_protein.drop([i for i in df_input_protein.columns if 'remove' in i], axis=1, inplace=True) # drop duplicated columns
-    # 2 - Select nutrient and amino acid data already treated for the model. Exclude traditional protein sources and the same category as the input protein
+    # Merge nutrient, amino acid and environmental data for the input protein
+    df_input_protein = df_input_protein.merge(df_protein_source_environmental, how='inner', left_on=['id'], right_on=['id'], suffixes=('', '_remove'))
+    df_input_protein.drop([i for i in df_input_protein.columns if 'remove' in i], axis=1, inplace=True) # drop duplicated columns
+    # 2 - Select nutrient, amino acid, environmental data already treated for the model. Exclude traditional protein sources and the same category as the input protein
     with engine.connect() as connection:
         trans = connection.begin()
         # 2.1 - Select nutrient data for the model
@@ -1053,8 +1405,8 @@ def AltProtRecommendation(data: data_models.userProteinInput, engine):
                                                                 pst.protein_source != 'Traditional' \
                                                                 AND psfg.category = '{}' \
                                                                 AND psfg.id != '{}';".format(category, data.proteinId)) , con=connection)
-        # 2.2 - Select nutrients and amino acid data for the model
-        result_nutrients_aminoacid_data_model = pd.read_sql_query(text("WITH aminoacids AS (\
+        # 2.2 - Select nutrients, amino acid, environmental data for the model
+        result_nutrients_aminoacid_environmental_data_model = pd.read_sql_query(text("WITH aminoacids AS (\
                                         SELECT \
                                             psfg.protein_source_or_food_product,\
                                             pst.source_type,\
@@ -1124,23 +1476,40 @@ def AltProtRecommendation(data: data_models.userProteinInput, engine):
                                         INNER JOIN protein_source_type pst ON pst.protein_source = psfg.protein_source\
                                         LEFT JOIN public.aminoacid_data_imputation_model_input_normalised adimin ON psfg.protein_source_or_food_product = adimin.protein_source_or_food_product \
                                         LEFT JOIN public.aminoacids_theoretical_values atv ON pst.protein_source = atv.protein_source\
+                                        ),\
+                                        environmental_impact as (\
+                                        select\
+                                            psfg.protein_source_or_food_product,\
+                                            pst.source_type,\
+                                            pst.protein_source,\
+                                            CASE \
+                                                WHEN edimin.\"Climate change (kg CO2 eq)\" IS NULL THEN etv.\"Climate change (kg CO2 eq)\"\
+                                                ELSE edimin.\"Climate change (kg CO2 eq)\"\
+                                            END \"Climate change (kg CO2 eq)\"\
+                                        FROM \
+                                            protein_source_format_gm psfg\
+                                        INNER JOIN protein_source_type pst ON pst.protein_source = psfg.protein_source\
+                                        LEFT JOIN public.environmental_data_imputation_model_input_normalised edimin ON psfg.protein_source_or_food_product = edimin.protein_source_or_food_product \
+                                        LEFT JOIN public.environmental_theoretical_values etv ON pst.protein_source = etv.protein_source\
                                         )\
                                         SELECT\
                                             psfg.id,\
                                             psfg.category,\
                                             ndim.*,\
-                                            aa.*\
+                                            aa.*,\
+                                            ei.*\
                                         FROM\
                                             protein_source_format_gm psfg\
                                         INNER JOIN protein_source_type pst ON pst.protein_source = psfg.protein_source\
                                         INNER JOIN public.nutrients_data_imputation_model_input_normalised ndim ON ndim.protein_source_or_food_product = psfg.protein_source_or_food_product\
                                         INNER JOIN aminoacids aa ON aa.protein_source_or_food_product = psfg.protein_source_or_food_product\
+                                        INNER JOIN environmental_impact ei ON ei.protein_source_or_food_product = psfg.protein_source_or_food_product\
                                         WHERE\
                                             pst.source_type != 'Traditional';"), con=connection)
 
         trans.commit()
 
-    df_protein_data_model = pd.DataFrame(result_nutrients_aminoacid_data_model)
+    df_protein_data_model = pd.DataFrame(result_nutrients_aminoacid_environmental_data_model)
     df_protein_data_model.drop_duplicates(inplace=True)
     #df_protein_data_model.fillna(0, inplace=True)
 
