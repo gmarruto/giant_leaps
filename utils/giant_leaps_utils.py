@@ -12,9 +12,18 @@ from sshtunnel import SSHTunnelForwarder
 
 import os
 
-def connect_giantleaps_database():
+def connect_giantleaps_database(db_conn_file, db_name):
 
-    db_url = f'REMOVED'
+    with open(db_conn_file) as f:
+        db_conn_info = json.load(f)
+
+    port = db_conn_info[db_name]['port']
+    host = db_conn_info[db_name]['host']
+    db = db_conn_info[db_name]['db']
+    pw = db_conn_info[db_name]['password']
+    user = db_conn_info[db_name]['user']
+
+    db_url = f'postgresql://{user}:{pw}@{host}:{port}/{db}'
 
     return create_engine(db_url)
 
@@ -79,9 +88,9 @@ def connect_sync_database(db_conn_file, db_name, db_type, ssh = False):
     if db_type == 'PostgreSQL':
         if ssh == True:
             tunnel = SSHTunnelForwarder(
-                ('REMOVED', 22),
-                ssh_username='REMOVED',
-                ssh_password='REMOVED',
+                (db_conn_info[db_name]['host_tunnel'], db_conn_info[db_name]['port_tunnel']),
+                ssh_username=db_conn_info[db_name]['username_tunnel'],
+                ssh_password=db_conn_info[db_name]['password_tunnel'],
                 #ssh_private_key_password=secrets.ssh_private_key_password,
                 remote_bind_address=('127.0.0.1', 5432)
             )
